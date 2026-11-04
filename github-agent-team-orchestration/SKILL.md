@@ -32,6 +32,7 @@ Run a team of worker agents against a repo's open issues with no human in the lo
 3. Snapshot `gh issue list` AND `gh pr list` — skip issues already claimed or linked to open PRs (other sessions/teams may be running; a claim comment by another agent is a claim).
 4. Rank the queue (small, self-contained, unblocked first; defer `needs-design`/`discussion`/assigned). Write the ledger: `<scratchpad>/run/state.json` with queue, workers, review ring, timestamps, deadline, wind-down time.
 5. Production uptime preflight: health URLs + an authorized recovery path (§Production uptime loop), then start the uptime cron.
+6. Description preflight (§PR descriptions): record `edit_path` (is `forge_update_pr` in the tool list?), check that the repo has the `pr-description-labels` workflow and the two labels, and sweep open bot PRs whose body lacks `<!-- tw:written -->` into `rewrite_queue` (read-only: `gh pr list --author <bot> --json number,body,labels`).
 
 ## Identity & fork mechanics (hard-won — read before first delivery)
 
@@ -65,7 +66,13 @@ The maintainer's first contact with every PR is its description, and it is the o
 
 - Writer reports `blocked: identity-pool` → it still writes; orchestrator sends the implementer `OPEN PR <N> <title-file> <body-file>` to post the files verbatim.
 - Writer dead or silent 2 ticks → respawn fresh (it holds no state; everything is in the brief and the diff). At the deadline with a branch still `awaiting-description`, the implementer opens a **draft** PR whose body is the brief under a `Description pending — technical writer` heading, so nothing is half-pushed.
-- Writer reports `context: stale` or `orders_done: 6` → respawn fresh before the next order. A writer that has read many diffs drifts back toward implementer prose.
+- Writer reports `context: stale` or `orders_done: 6` → respawn fresh before the next order. A writer that has read many diffs drifts back toward implementer prose. Rewrites count as orders.
+
+**Labels and the marker (GitHub as the source of truth):** every writer-produced body ends with the hidden line `<!-- tw:written -->`. The repo-side workflow [pr-description-labels.yml](pr-description-labels.yml), installed by the maintainer, labels every bot PR `description:written` when the marker is present and `needs-description` when it is not, on open, edit and push. Reconciliation is then a label query, not a ledger read: `needs-description` = rewrite owed, no PR for a delivered fork branch = write owed. The agents never touch labels themselves; the forge tools cannot, and the human's `gh` is read-only.
+
+**Old PRs (`REWRITE PR <M>`):** PRs opened before this flow, or by an implementer during a writer outage, carry implementer prose. The preflight sweep queues them; the writer rewrites from the old body (as the brief), the linked issue and the diff, keeps the old body verbatim in a collapsed "Original description" block, and posts through the PR edit path. The writer's own queue runs `WRITE PR > UPDATE PR > REWRITE PR`; rewrites fill the writer's idle time and never delay a new PR.
+
+**The PR edit path is a prerequisite, not an assumption.** `UPDATE PR` and `REWRITE PR` need the identity proxy's `forge_update_pr` tool (agent-identity ≥ 0.5: edits the title/body of a PR the bot account opened, carries the attribution footers forward, refuses any other author). Older proxies offer only open-PR and comment. Check the writer's tool list at preflight and record `edit_path`; without the tool, the writer delivers rewritten descriptions as a `**Description (tw)**` comment, the label stays `needs-description`, and the final report lists those PRs for the human to paste in. Labels and draft state are never the proxy's job. Do not route around a missing tool with a bot PAT or the human's credentials.
 
 **What the orchestrator checks on each `WRITE PR` report:** `cold_read` is `pass` or `pass-after-rewrite` (a `shipped-with-leftovers` list goes into the handoff report for the human), and `words` is within 300–700. Two consecutive out-of-shape reports → respawn the writer.
 
@@ -120,7 +127,7 @@ is progressing, append a one-line heartbeat to the ledger and say nothing else.
 Per tick:
 
 1. `ListAgents` + process worker reports → update ledger, dispatch next orders (WRITE PR > REVIEW > BABYSIT > ISSUE).
-2. Reconcile against GitHub read-only (`gh pr list --json number,state,reviewDecision,statusCheckRollup`). Ledger disagrees → GitHub wins.
+2. Reconcile against GitHub read-only (`gh pr list --json number,state,reviewDecision,statusCheckRollup,labels`). Ledger disagrees → GitHub wins. `needs-description` on an open bot PR → it belongs in `rewrite_queue`; a fork branch `agent/*-issue-*` with no PR → it belongs in `awaiting-description`.
 3. Dead worker (gone from ListAgents, SendMessage errors, silent 2 ticks) → respawn fresh with kickoff + handoff paragraph built from reconciled state ("you replace w2; PR #510 open CI red; branch exists; reconcile, don't restart").
 4. Stuck worker (same issue >3 ticks) → timebox order; one more tick → park it (WIP branch + issue comment, issue → deferred).
 5. **Cancelled ≠ failed.** On a shared self-hosted runner, the maintainer may cancel queued PR runs on purpose to let a deploy through. Re-queue cancelled runs only once no deploy is in progress, and don't report them as red CI. A worker's job is never "rerun CI" (the bot usually can't); the orchestrator does it.
@@ -184,7 +191,7 @@ Detection: simultaneous worker deaths / limit-error text with a reset time.
 
 ## Wind-down & handoff
 
-T−2h: stop assigning issues; WRITE PR/REVIEW/BABYSIT only; park unshippable WIP; every delivered branch gets its PR before the deadline (draft with the brief as body if the writer cannot). Deadline: final reconcile, then the human-facing report: PR table (number, issue, CI, review verdict, ready-to-merge?), deferred issues with reasons, parked WIP branches, **explicit "nothing was merged"**, decisions needing a human, any prod incidents. Stop the wake chain and `CronDelete` the heartbeat and uptime crons.
+T−2h: stop assigning issues; WRITE PR/REVIEW/BABYSIT only; park unshippable WIP; every delivered branch gets its PR before the deadline (draft with the brief as body if the writer cannot). Deadline: final reconcile, then the human-facing report: PR table (number, issue, CI, review verdict, description written/rewritten/as-comment, ready-to-merge?), deferred issues with reasons, parked WIP branches, PRs still labelled `needs-description`, **explicit "nothing was merged"**, decisions needing a human, any prod incidents. Stop the wake chain and `CronDelete` the heartbeat and uptime crons.
 
 ## Common Mistakes
 
@@ -202,6 +209,7 @@ T−2h: stop assigning issues; WRITE PR/REVIEW/BABYSIT only; park unshippable WI
 | Implementer writes its own PR body ("I have all the context") | That context is the defect: the body comes out as notes-to-self. Brief → writer → cold read → PR |
 | Writer skips the cold read ("it reads fine to me") | The writer has just read the diff; only a reader who hasn't can tell what is unexplained |
 | Writer reused across the whole run | After ~6 diffs it writes like an implementer; respawn fresh |
+| "The writer can `gh pr edit` with the bot PAT" | Workers hold no PAT; the edit path is a proxy tool or nothing. Comment fallback + report, never a credential hunt |
 
 ## Red Flags — STOP
 

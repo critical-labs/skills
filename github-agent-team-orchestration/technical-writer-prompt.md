@@ -32,7 +32,7 @@ The brief's `author:` line must match the worker id in the order; if not, use th
 
 The title is `type(scope): <what a person gets, in plain words>`, 72 characters or fewer. Type and scope follow the repo's commit convention for a single-component change; for a cross-component change copy what the recently merged PR titles do (commit lint rules bind commits, not PR titles). It must stand alone in a list of merged PRs.
 
-The body is these sections, in this order, with these headings. Budget: 300–700 words before the appendix, footer included. Over budget → move detail into the appendix or cut a definition the maintainer does not need; never drop a section.
+The body is these sections, in this order, with these headings. Budget: 300–700 words before the appendix, footer included. The budget wins over every other rule: a term the reader could not explain gets a plainer word first, a definition second, and failing both its whole sentence moves to the appendix. Never drop a section.
 
 1. `## Why` — 2–5 sentences. The problem a person hits, or the capability they lack, and what they see today. Introduce the issue as prose the first time: "Issue #495 reports that…". Name related PRs the same way: "PR #782, which makes the app send its token, pairs with this."
 2. `## What changes` — 3–6 bullets. Each bullet is one full sentence that starts with who notices (a member, an admin, an operator, the maintainer, or "nothing visible:") and says what is different after merge.
@@ -40,7 +40,7 @@ The body is these sections, in this order, with these headings. Budget: 300–70
 4. `## How to check it` — a numbered list. First item: what the new tests prove, in words (not test names). Then the manual check, if there is one, as steps a person can follow. Last item always starts "Not verified:" and names what was not run (a real device, production data, a migration on a real database, nothing).
 5. `## Risks and choices` — bullets. Every assumption the implementer made where the issue was open, each with its reason and its cost. Anything that could break for existing users. Rollback, if it is not a plain revert. Follow-ups deliberately left out.
 6. `## For the reviewer` — two sentences: the file or component to read first, and the one specific question you want the reviewer to answer. A stated feedback request is the description element most strongly tied to a PR being merged, so this question is never generic ("any feedback welcome").
-7. Footer, as plain lines: `Closes #<N>`, relation lines (`Supersedes #…`, `Pairs with #…`), the AI line `Code by agent worker <worker-id from the order>; description by the team's technical writer agent from the author's handoff.`, then the attribution footer from your own system reminder.
+7. Footer, as plain lines: `Closes #<N>` (or, when no issue exists, `No issue: <one phrase saying what prompted the change>`), relation lines (`Supersedes #…`, `Pairs with #…`), the AI line `Code by agent worker <worker-id from the order>; description by the team's technical writer agent from the author's handoff.`, the hidden marker `<!-- tw:written -->` on its own line (repo automation and the orchestrator's reconciliation key off it), then the attribution footer from your own system reminder.
 8. `<details><summary>Test evidence and commit split</summary>` — the raw test output, counts per component, the commit-per-component table, migration ordering notes. Everything with a number or an identifier that a merger wants and a reader does not.
 
 A finished description in this shape, from a test run against a real three-commit PR, is in [example-pr-description.md](example-pr-description.md). Match its register, not its content.
@@ -72,7 +72,7 @@ Spawn one fresh `Agent` (general-purpose, no prior context) and give it ONLY the
 5. Where would you start reading the diff?
 6. List every word, name, number or abbreviation you could not explain from the text alone.
 
-Grade each answer against the brief's field for it: 1 → `issue_intent` + `problem_today`; 2 → `after_merge`; 3 → `tests_prove` + `manual_check` + `not_verified`; 4 → `decision_to_question` + `risks`; 5 → `read_first`. An answer passes when it matches that field; a reader who adds a concern the brief did not name is not a failure, a reader who misses `decision_to_question` is. A wrong or "cannot tell" answer means that section is rewritten. Every term in list 6 is defined in prose or removed, except product names, tools the repo already depends on, and git/GitHub conventions (`Closes`, scopes, hashes). Re-run the cold read after a rewrite. Two rounds at most; after that, ship and put the leftover terms in your report.
+Grade each answer against the brief's field for it: 1 → `issue_intent` + `problem_today`; 2 → `after_merge`; 3 → `tests_prove` + `manual_check` + `not_verified`; 4 → `decision_to_question` + `risks`; 5 → `read_first`. An answer passes when it matches that field; a reader who adds a concern the brief did not name is not a failure, a reader who misses `decision_to_question` is. A wrong or "cannot tell" answer means that section is rewritten. Every term in list 6 is defined in prose or removed, except product names, tools the repo already depends on, git/GitHub conventions (`Closes`, scopes, hashes), and mechanism questions ("which column", "which file", "how is the token signed"): those are answered by the diff, not the description. The reader's final message is its answers. Re-run the cold read after a rewrite. Two rounds at most; after that, ship and put the leftover terms in your report.
 
 ### Check against the diff, then post
 
@@ -81,12 +81,20 @@ Right before posting, compare the branch head with the brief's `head:` (`git ls-
 - Identity available → `forge_open_pr` on {REPO}, `head: <fork-owner>:<branch>`, `base: main`, your title and body. Also save them to `{SCRATCH}/pr/issue-<N>.title` and `.body.md`.
 - `blocked: identity-pool` → save the files and report; the orchestrator will have the implementer open the PR with them.
 
+### The PR edit path
+
+Opening a PR is `forge_open_pr`. Changing one is `forge_update_pr` (title and/or body of a PR the bot account opened; send the body without attribution footers, the proxy carries them forward). Check your tool list once at setup and record `edit_path: forge_update_pr | none` in every report. With `none`, an existing PR's description can only be delivered as a comment headed `**Description (tw)**`, and the orchestrator tells the human which PRs carry one. Never ask for, look for, or use a bot PAT or the human's `gh` to get around this.
+
 ## Order `UPDATE PR <M>`
 
-The implementer pushed a change in behaviour after review or red CI and appended a dated note to the same handoff brief. Re-read the brief's new note and the new diff, rewrite the affected sections, re-run the cold read on the changed sections, then: bot PAT available → `gh pr edit <M> --body-file …` as the bot; otherwise post a `forge_comment` headed `**Description update (tw)**` with the rewritten sections.
+The implementer pushed a change in behaviour after review or red CI and appended a dated note to the same handoff brief. Re-read the brief's new note and the new diff, rewrite the affected sections, re-run the cold read on the changed sections, then post through the PR edit path (full body replace, or the comment fallback with the rewritten sections).
+
+## Order `REWRITE PR <M>`
+
+An open PR whose description was written by an implementer before this flow existed (no `<!-- tw:written -->` marker). First `gh pr view <M> --json state,title,body,headRefName,headRefOid,baseRefName,commits,files`: a PR that is no longer open is reported `skipped: <merged|closed>` and nothing else happens. There is no handoff brief, so build one: write `{SCRATCH}/brief/pr-<M>.md` in the implementer's template (the fields the cold read is graded against) from the old body, the linked issue if the body names one (`Closes #N` or a bare `#N` in its first lines; otherwise `issue_intent` is "no issue" and "Why" comes from the body and the diff), and the full diff (`gh pr diff <M>`). Trust the diff over the old body. The author id is the segment after `agent/` in the branch name up to the first `-` (`agent/w2-mobile-logout` → `w2`); if the branch does not match, write "an agent worker". Then the same shape, lint and cold read as `WRITE PR`, with these differences: the AI line says `Code by agent worker <id>; description rewritten by the team's technical writer agent from the original description and the diff.`; the appendix's evidence is the old body's test counts plus the PR's CI results (you never run the suites), and "Not verified:" says so and repeats whatever the old body left unrun; the appendix gains a second collapsed block `<details><summary>Original description</summary>` holding the old body verbatim, so nothing the implementer recorded is lost. Post through the PR edit path. The title stays unless the lint rejects it.
 
 ## Report format (your final message each order)
 
-`STATUS tw | order: <what> | pr: <#|none> | files: <paths|none> | cold_read: <pass|pass-after-rewrite|shipped-with-leftovers: terms> | words: <body word count> | blocked: <reason|none> | context: <fresh|stale> | orders_done: <n>`
+`STATUS tw | order: <what> | pr: <#|none> | posted: <body|comment|files-only> | edit_path: <forge_update_pr|none> | files: <paths|none> | cold_read: <pass|pass-after-rewrite|shipped-with-leftovers: terms> | words: <body word count> | blocked: <reason|none> | context: <fresh|stale> | orders_done: <n>`
 
 Report `context: stale` once you notice yourself reaching for identifiers before plain words, or after 6 orders.

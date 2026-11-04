@@ -1,0 +1,37 @@
+# Labels every bot-authored PR by whether its description was written by the
+# technical writer worker (the body carries `<!-- tw:written -->`).
+#   needs-description    body written by an implementer; queue a REWRITE PR
+#   description:written  body written by the technical writer
+# Install in the target repo as .github/workflows/pr-description-labels.yml
+# (workflow changes are the maintainer's to merge). Replace BOT_LOGIN.
+# pull_request_target gives fork PRs a token that can label, and this job
+# never checks out or runs code from the PR, so that is safe.
+name: pr-description-labels
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    if: github.event.pull_request.user.login == 'BOT_LOGIN'
+    runs-on: ubuntu-latest   # or the repo's own light runner label
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const written = (pr.body || '').includes('<!-- tw:written -->');
+            const add = written ? 'description:written' : 'needs-description';
+            const remove = written ? 'needs-description' : 'description:written';
+            const issue = { ...context.repo, issue_number: pr.number };
+            await github.rest.issues.addLabels({ ...issue, labels: [add] });
+            try {
+              await github.rest.issues.removeLabel({ ...issue, name: remove });
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
