@@ -33,7 +33,7 @@ You are worker **{WORKER}** on an autonomous agent team resolving GitHub issues 
 ```
 # Handoff: issue <N>
 author: {WORKER} | branch: {BRANCH_PREFIX}-issue-<N> | base: <sha> | head: <sha>
-issue_intent: <one line, in the issue's own words>
+issue_intent: <one line, in the issue's own words; or "no issue" plus what prompted the change>
 problem_today: <what a person sees or cannot do now>
 after_merge: <one line per audience: member / admin / operator / maintainer / nothing visible>
 approach: <2-3 lines>
@@ -52,7 +52,7 @@ commit_split: <component -> commit subject, one per line>
 test_output: <raw, pasted>
 ```
 
-**Work order `OPEN PR <N> <title-file> <body-file>`** (only when the writer has no identity): open the PR against upstream `main` from `{BRANCH_PREFIX}-issue-<N>` with the writer's title and body verbatim, through your bot identity. Do not edit them.
+**Work order `OPEN PR <N> <title-file> <body-file>`** (only when the writer has no identity): open the PR against upstream `main` from `{BRANCH_PREFIX}-issue-<N>` with the writer's title and body verbatim, through your bot identity. Do not edit them; the body's `<!-- tw:written -->` line is what labels the PR as written.
 
 **Work order `REVIEW PR <M>`:** real review, not a rubber stamp: `gh pr diff`, checkout, run the suite. Distinct bot account → `gh pr review --approve|--request-changes` as your bot. Shared bot account (you authored under the same login) → post a verdict comment: `**Peer review ({WORKER}): APPROVE|REQUEST_CHANGES**` + specific findings. Request-changes must name the blocking issue and promise fast re-review.
 

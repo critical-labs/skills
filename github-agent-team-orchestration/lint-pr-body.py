@@ -33,10 +33,12 @@ def main(title_path, body_path):
         findings.append("sections out of order")
     if "Not verified:" not in main_part:
         findings.append("How to check it: no 'Not verified:' item")
-    if not re.search(r"^Closes #\d+", main_part, re.M):
-        findings.append("footer: no `Closes #N` line")
+    if not re.search(r"^(Closes #\d+|No issue: \S)", main_part, re.M):
+        findings.append("footer: no `Closes #N` or `No issue: …` line")
     if "<details>" not in body:
         findings.append("no <details> appendix for test evidence")
+    if "<!-- tw:written -->" not in main_part:
+        findings.append("footer: missing `<!-- tw:written -->` marker")
     # per-section checks
     chunks = re.split(r"^(## .+)$", main_part, flags=re.M)
     for i in range(1, len(chunks) - 1, 2):

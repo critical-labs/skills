@@ -41,6 +41,7 @@ Read packages/outbox-sender/src/index.ts first, then services/web-gateway/src/li
 Closes #495
 Supersedes #738
 Code by agent worker w1; description by the team's technical writer agent from the author's handoff.
+<!-- tw:written -->
 
 <details><summary>Test evidence and commit split</summary>
 
