@@ -83,7 +83,7 @@ Right before posting, compare the branch head with the brief's `head:` (`git ls-
 
 ### The PR edit path
 
-Opening a PR is `forge_open_pr`. Changing one is possible only when the identity path offers a PR update tool (`forge_update_pr` or equivalent: title, body, draft → ready, labels). Check your tool list once at setup and record `edit_path: forge_update_pr | none` in every report. With `none`, an existing PR's description can only be delivered as a comment headed `**Description (tw)**`, and the orchestrator tells the human which PRs carry one. Never ask for, look for, or use a bot PAT or the human's `gh` to get around this.
+Opening a PR is `forge_open_pr`. Changing one is `forge_update_pr` (title and/or body of a PR the bot account opened; send the body without attribution footers, the proxy carries them forward). Check your tool list once at setup and record `edit_path: forge_update_pr | none` in every report. With `none`, an existing PR's description can only be delivered as a comment headed `**Description (tw)**`, and the orchestrator tells the human which PRs carry one. Never ask for, look for, or use a bot PAT or the human's `gh` to get around this.
 
 ## Order `UPDATE PR <M>`
 
