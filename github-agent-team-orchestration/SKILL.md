@@ -24,6 +24,7 @@ Run a team of worker agents against a repo's open issues with no human in the lo
 4. **Checkpoint before anything can kill you.** The ledger write comes before risky calls, before bridging a usage gap, before ending any turn.
 5. **Workers run heavy:** spawn with the strongest general model available (`model: "opus"` or better) and include the literal keyword `ultracode` in the kickoff prompt — the user's invocation of this skill is the explicit multi-agent opt-in that ultracode requires. Default-model, non-ultracode workers are a baseline failure, not a judgment call.
 6. **Implementers never write their own PR description.** The worker that wrote the code writes a handoff brief (facts); the technical writer, with only the issue, the brief and the diff in context, writes the title and body for the human and opens the PR. A body written from inside the implementation context reads as the author's notes to itself. See §PR descriptions.
+7. **Open PRs are capped by CI capacity, not by how fast the team can write code.** A delivery or push past the cap is staged, not shipped. A team that out-produces the runners doesn't speed anything up: it buries every PR (and the maintainer's deploys and monitors) under a CI queue. See §CI budget.
 
 ## Phase 0 — Preflight (orchestrator, once)
 
@@ -32,7 +33,8 @@ Run a team of worker agents against a repo's open issues with no human in the lo
 3. Snapshot `gh issue list` AND `gh pr list` — skip issues already claimed or linked to open PRs (other sessions/teams may be running; a claim comment by another agent is a claim).
 4. Rank the queue (small, self-contained, unblocked first; defer `needs-design`/`discussion`/assigned). Write the ledger: `<scratchpad>/run/state.json` with queue, workers, review ring, timestamps, deadline, wind-down time.
 5. Production uptime preflight: health URLs + an authorized recovery path (§Production uptime loop), then start the uptime cron.
-6. Description preflight (§PR descriptions): record `edit_path` (is `forge_update_pr` in the tool list?), check that the repo has the `pr-description-labels` workflow and the two labels, and sweep open bot PRs whose body lacks `<!-- tw:written -->` into `rewrite_queue` (read-only: `gh pr list --author <bot> --json number,body,labels`).
+6. CI budget preflight (§CI budget): count the runners that serve PR checks, measure a typical PR's CI time, count the open bot PRs, and write `ci_budget` into the ledger. If open bot PRs are already at or over the cap, the run starts in **stage mode**: no new PRs until the count drops.
+7. Description preflight (§PR descriptions): record `edit_path` (is `forge_update_pr` in the tool list?), check that the repo has the `pr-description-labels` workflow and the two labels, and sweep open bot PRs whose body lacks `<!-- tw:written -->` into `rewrite_queue` (read-only: `gh pr list --author <bot> --json number,body,labels`).
 
 ## Identity & fork mechanics (hard-won — read before first delivery)
 
@@ -48,7 +50,36 @@ Run a team of worker agents against a repo's open issues with no human in the lo
 
 ## Spawning workers
 
-Spawn N (default 3) implementer workers plus one technical writer as background `Agent` calls in one block, `model` = strongest available. Implementers use [kickoff-prompt.md](kickoff-prompt.md), the writer uses [technical-writer-prompt.md](technical-writer-prompt.md), with substitutions (worker id, branch prefix, scratch dir, shared `HANDOFF_DIR`, repo, fork). Each worker gets its own clone/worktree — never share a working tree. Record agentIds in the ledger (`workers.w1…`, `workers.tw`). Workers are message-driven: one work order (`ISSUE <N>` / `REVIEW PR <M>` / `BABYSIT` / `OPEN PR` for implementers; `WRITE PR <N>` / `UPDATE PR <M>` for the writer) per `SendMessage`, structured report back, stop. The orchestrator arbitrates issue assignment from the ledger queue — workers never self-assign (prevents races).
+Spawn N (default 3) implementer workers plus one technical writer as background `Agent` calls in one block, `model` = strongest available. Implementers use [kickoff-prompt.md](kickoff-prompt.md), the writer uses [technical-writer-prompt.md](technical-writer-prompt.md), with substitutions (worker id, branch prefix, scratch dir, shared `HANDOFF_DIR`, repo, fork). Each worker gets its own clone/worktree — never share a working tree. Record agentIds in the ledger (`workers.w1…`, `workers.tw`). Workers are message-driven: one work order (`ISSUE <N> ship: deliver|stage` / `DELIVER <staged-path>` / `REVIEW PR <M>` / `BABYSIT` / `OPEN PR` for implementers; `WRITE PR <N>` / `UPDATE PR <M>` for the writer) per `SendMessage`, structured report back, stop. The orchestrator arbitrates issue assignment from the ledger queue — workers never self-assign (prevents races).
+
+## CI budget and the open-PR cap
+
+Every open PR costs CI: a full run on open, and another on every push. When the team's demand outruns the runners, the queue grows without bound. All PRs then wait hours for a verdict, and fixups for red checks wait behind new work. On a shared self-hosted runner, the queue also starves the maintainer's deploys and scheduled jobs such as the prod uptime monitor.
+
+What that looked like (homefree, 2026-11-04/05): 2 implementers on 2 runners produced 7× the CI capacity. 133 PRs were open, 158 runs were queued, and the oldest had waited 15.7 h. The scheduled prod uptime monitor stopped running (its watchdog filed an issue), and only 29 PRs ever got a verdict. The fix was a manual freeze, "no new PRs except security fixes; stage the rest", which the cap below makes the default.
+
+**The budget (ledger `ci_budget`, set at preflight, adjustable by the maintainer):**
+
+- `max_open_prs`: bot PRs open at once that haven't been merged or closed. Default **2 × implementers**, never above **runners × 3**. A green, peer-approved PR waiting for the maintainer still counts, because the maintainer's merge rate is part of the pipeline. If merges are slow, the cap is what makes that visible.
+- `max_queue_age`: when the oldest queued PR run is older than this (default 60 min), stop new deliveries even under the cap.
+- `security_reserve`: 1 slot above the cap, only for a fix to a live, exploitable issue. A security fix past the reserve still goes in, but tell the user in the same turn.
+
+**Measuring it, read-only, at each dispatch and each heartbeat:**
+
+- open bot PRs: `gh pr list -R <repo> --author <bot> --state open --json number --jq length`
+- queue depth and age: `gh run list -R <repo> --status queued --json createdAt --limit 200`
+
+**Dispatch rules:**
+
+1. **Under the cap and the queue is fresh** → `ISSUE <N> ship: deliver`.
+2. **At the cap, or the queue is too old** → `ISSUE <N> ship: stage`. The worker builds and tests as normal, then writes a self-sufficient bundle plus brief (kickoff-prompt.md). The orchestrator adds it to `delivery_queue` in the ledger, with priority (security > prod-safety > fixes > features > docs) and dependencies.
+3. **A slot opens** (a PR merged or closed, or the queue drained) → send `DELIVER <staged-path>` for the highest-priority staged item whose dependencies have merged, before any new `ISSUE ship: deliver`. The worker rebases and re-tests first; a staged branch is never delivered as is.
+4. **Pushes cost runs too.** Push to an open PR only on a red check or a reviewer's requested change, one batched push per review round. A reviewer nit that needs no fix to merge goes in the verdict, not in a push. Tell the reviewer that too.
+5. **Supersede sparingly.** A `-v2` PR adds an open PR until the maintainer closes the old one. Supersede only when the old branch truly can't be fixed in place (`forge_deliver` can't rewrite history). Put the old number on the close list the same turn, and count both until it's closed.
+6. **Don't re-run cancelled runs while over budget.** A re-run adds to the same queue the cap protects. Re-queue cancelled runs only when `max_queue_age` is met and no deploy is in progress.
+7. **Cap reached but workers idle?** That isn't a reason to raise the cap. Staged work, reviews, audits, design proposals and the delivery queue's rebases are all real work. Raise the cap only on the maintainer's word, and record the new value in the ledger.
+
+**Report the budget** in every heartbeat line (`open 9/4 · queue 158 oldest 15.7h · staged 12`) and in the handoff report, with the delivery queue in priority order, so the maintainer sees the backlog the cap is holding back.
 
 ## PR descriptions (technical writer)
 
@@ -113,25 +144,27 @@ is progressing, append a one-line heartbeat to the ledger and say nothing else.
 1. ListAgents. If a worker has an order in the ledger but has been silent for 2+ heartbeats, SendMessage
    it a status nudge; if SendMessage errors, respawn it fresh (opus, ultracode) with a handoff paragraph
    built from GitHub state.
-2. Reconcile open agent PRs read-only (gh pr list --json number,headRefName,reviewDecision,statusCheckRollup).
-   Re-run CI runs that were CANCELLED (not failed) on open agent PRs, but not while a deploy run is in
-   progress (a single shared runner is reserved for deploys then).
+2. Reconcile open agent PRs read-only (gh pr list --json number,headRefName,reviewDecision,statusCheckRollup)
+   and measure the CI budget (open bot PRs vs ci_budget.max_open_prs; oldest queued run vs max_queue_age).
+   Re-run CI runs that were CANCELLED (not failed) on open agent PRs only when within budget and no deploy
+   run is in progress (a single shared runner is reserved for deploys then).
 3. If a branch is awaiting-description and the writer is idle, dispatch WRITE PR; if a worker is idle and
-   a REVIEW is owed, dispatch it; if the implementer is idle and the queue is non-empty, dispatch the next
-   ISSUE (WRITE PR > REVIEW > BABYSIT > ISSUE). Never merge anything except PRs the maintainer already
-   approved with merge-when-green.
+   a REVIEW is owed, dispatch it; if a PR slot is free and delivery_queue is non-empty, dispatch DELIVER of
+   its top item; otherwise dispatch the next ISSUE with ship: deliver when under budget and ship: stage
+   when not (WRITE PR > REVIEW > BABYSIT > DELIVER > ISSUE). Never merge anything except PRs the maintainer
+   already approved with merge-when-green.
 4. Only surface something to the user if it needs them: a decision, a blocked worker, a failed (not
    cancelled) check, or the queue finishing.
 ```
 
 Per tick:
 
-1. `ListAgents` + process worker reports → update ledger, dispatch next orders (WRITE PR > REVIEW > BABYSIT > ISSUE).
+1. `ListAgents` + process worker reports → update ledger, dispatch next orders (WRITE PR > REVIEW > BABYSIT > DELIVER > ISSUE). Every `ISSUE` order carries `ship: deliver|stage` from the current CI budget (§CI budget).
 2. Reconcile against GitHub read-only (`gh pr list --json number,state,reviewDecision,statusCheckRollup,labels`). Ledger disagrees → GitHub wins. `needs-description` on an open bot PR → it belongs in `rewrite_queue`; a fork branch `agent/*-issue-*` with no PR → it belongs in `awaiting-description`.
 3. Dead worker (gone from ListAgents, SendMessage errors, silent 2 ticks) → respawn fresh with kickoff + handoff paragraph built from reconciled state ("you replace w2; PR #510 open CI red; branch exists; reconcile, don't restart").
 4. Stuck worker (same issue >3 ticks) → timebox order; one more tick → park it (WIP branch + issue comment, issue → deferred).
 5. **Cancelled ≠ failed.** On a shared self-hosted runner, the maintainer may cancel queued PR runs on purpose to let a deploy through. Re-queue cancelled runs only once no deploy is in progress, and don't report them as red CI. A worker's job is never "rerun CI" (the bot usually can't); the orchestrator does it.
-6. Heartbeat line into the ledger, reschedule (ScheduleWakeup mode only; a cron re-fires on its own).
+6. Heartbeat line into the ledger with the budget (`open 9/4 · queue 158 oldest 15.7h · staged 12`), reschedule (ScheduleWakeup mode only; a cron re-fires on its own).
 
 ## Production uptime loop (orchestrator)
 
@@ -191,7 +224,7 @@ Detection: simultaneous worker deaths / limit-error text with a reset time.
 
 ## Wind-down & handoff
 
-T−2h: stop assigning issues; WRITE PR/REVIEW/BABYSIT only; park unshippable WIP; every delivered branch gets its PR before the deadline (draft with the brief as body if the writer cannot). Deadline: final reconcile, then the human-facing report: PR table (number, issue, CI, review verdict, description written/rewritten/as-comment, ready-to-merge?), deferred issues with reasons, parked WIP branches, PRs still labelled `needs-description`, **explicit "nothing was merged"**, decisions needing a human, any prod incidents. Stop the wake chain and `CronDelete` the heartbeat and uptime crons.
+T−2h: stop assigning issues; WRITE PR/REVIEW/BABYSIT only; park unshippable WIP; every delivered branch gets its PR before the deadline (draft with the brief as body if the writer cannot). Deadline: final reconcile, then the human-facing report: PR table (number, issue, CI, review verdict, description written/rewritten/as-comment, ready-to-merge?), deferred issues with reasons, parked WIP branches, PRs still labelled `needs-description`, the CI budget and the staged delivery queue in priority order (with dependencies), **explicit "nothing was merged"**, decisions needing a human, any prod incidents. Stop the wake chain and `CronDelete` the heartbeat and uptime crons.
 
 ## Common Mistakes
 
@@ -209,6 +242,9 @@ T−2h: stop assigning issues; WRITE PR/REVIEW/BABYSIT only; park unshippable WI
 | Implementer writes its own PR body ("I have all the context") | That context is the defect: the body comes out as notes-to-self. Brief → writer → cold read → PR |
 | Writer skips the cold read ("it reads fine to me") | The writer has just read the diff; only a reader who hasn't can tell what is unexplained |
 | Writer reused across the whole run | After ~6 diffs it writes like an implementer; respawn fresh |
+| "Workers are idle, so open more PRs" | Past the CI cap a PR only lengthens the queue. Stage it; it ships when a slot opens |
+| A `-v2` PR per failed check, a push per review nit | Each is a full CI run and the v2 holds a second slot. Fix in place, batch pushes, leave nits in the verdict |
+| Re-running cancelled runs to "help" the queue | It adds to the queue. Only within budget, and never during a deploy |
 | "The writer can `gh pr edit` with the bot PAT" | Workers hold no PAT; the edit path is a proxy tool or nothing. Comment fallback + report, never a credential hunt |
 
 ## Red Flags — STOP
@@ -218,5 +254,6 @@ T−2h: stop assigning issues; WRITE PR/REVIEW/BABYSIT only; park unshippable WI
 - "Retry spawning until the limit clears"
 - "I'll remember the state" — the ledger write comes first, always
 - "The fork's main is probably fine" before a delivery
+- "Just one more PR over the cap, it's small" (stage it; the cap counts PRs, not lines)
 - "I'll open the PR myself, the description will take two minutes" (implementer) / "skip the cold read, it's clear" (writer)
 - "Prod is down, the rollback is blocked — I'll edit the box another way" (alert the user with the command instead)
