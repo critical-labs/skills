@@ -33,7 +33,7 @@ Run a team of worker agents against a repo's open issues with no human in the lo
 3. Snapshot `gh issue list` AND `gh pr list` — skip issues already claimed or linked to open PRs (other sessions/teams may be running; a claim comment by another agent is a claim).
 4. Rank the queue (small, self-contained, unblocked first; defer `needs-design`/`discussion`/assigned). Write the ledger: `<scratchpad>/run/state.json` with queue, workers, review ring, timestamps, deadline, wind-down time.
 5. Production uptime preflight: health URLs + an authorized recovery path (§Production uptime loop), then start the uptime cron.
-6. CI budget preflight (§CI budget): count the runners that serve PR checks, measure a typical PR's CI time, count the open bot PRs, and write `ci_budget` into the ledger. If open bot PRs are already at or over the cap, the run starts in **stage mode**: no new PRs until the count drops.
+6. CI budget preflight (§CI budget): count the runners that serve PR checks, measure a typical PR's CI time, check whether the PR workflows skip drafts, count the open bot PRs that still need CI (non-draft, not green), and write `ci_budget` into the ledger. If open bot PRs are already at or over the cap, the run starts in **stage mode**: no new PRs until the count drops.
 7. Description preflight (§PR descriptions): record `edit_path` (is `forge_update_pr` in the tool list?), check that the repo has the `pr-description-labels` workflow and the two labels, and sweep open bot PRs whose body lacks `<!-- tw:written -->` into `rewrite_queue` (read-only: `gh pr list --author <bot> --json number,body,labels`).
 
 ## Identity & fork mechanics (hard-won — read before first delivery)
@@ -60,13 +60,15 @@ What that looked like (homefree, 2026-11-04/05): 2 implementers on 2 runners pro
 
 **The budget (ledger `ci_budget`, set at preflight, adjustable by the maintainer):**
 
-- `max_open_prs`: bot PRs open at once that haven't been merged or closed. Default **2 × implementers**, never above **runners × 3**. A green, peer-approved PR waiting for the maintainer still counts, because the maintainer's merge rate is part of the pipeline. If merges are slow, the cap is what makes that visible.
+- `max_open_prs`: bot PRs that still need CI, meaning open, not draft, and without a green required gate. Default **2 × implementers**, never above **runners × 3**.
+  - **Excluded:** a green PR waiting only for the maintainer's merge costs no CI until it's pushed again. Report those separately (`awaiting merge: N`), so a slow merge rate stays visible without blocking delivery.
+  - **Drafts:** they are excluded **only if the repo's PR workflows skip drafts.** Check the triggers at preflight: `types:` should include `ready_for_review`, and each job should have `if: !github.event.pull_request.draft`. If the workflows run on drafts, a draft costs the same as a ready PR and counts. Record which applies as `ci_budget.drafts_skip_ci`.
 - `max_queue_age`: when the oldest queued PR run is older than this (default 60 min), stop new deliveries even under the cap.
 - `security_reserve`: 1 slot above the cap, only for a fix to a live, exploitable issue. A security fix past the reserve still goes in, but tell the user in the same turn.
 
 **Measuring it, read-only, at each dispatch and each heartbeat:**
 
-- open bot PRs: `gh pr list -R <repo> --author <bot> --state open --json number --jq length`
+- PRs that still need CI: `gh pr list -R <repo> --author <bot> --state open --json number,isDraft,statusCheckRollup --jq '[.[] | select(.isDraft|not) | select(([.statusCheckRollup[]? | select(.name=="<gate>") | .conclusion] | first) != "SUCCESS")] | length'` (`<gate>` is the repo's required gate check; count drafts too when `drafts_skip_ci` is false)
 - queue depth and age: `gh run list -R <repo> --status queued --json createdAt --limit 200`
 
 **Dispatch rules:**
@@ -77,9 +79,18 @@ What that looked like (homefree, 2026-11-04/05): 2 implementers on 2 runners pro
 4. **Pushes cost runs too.** Push to an open PR only on a red check or a reviewer's requested change, one batched push per review round. A reviewer nit that needs no fix to merge goes in the verdict, not in a push. Tell the reviewer that too.
 5. **Supersede sparingly.** A `-v2` PR adds an open PR until the maintainer closes the old one. Supersede only when the old branch truly can't be fixed in place (`forge_deliver` can't rewrite history). Put the old number on the close list the same turn, and count both until it's closed.
 6. **Don't re-run cancelled runs while over budget.** A re-run adds to the same queue the cap protects. Re-queue cancelled runs only when `max_queue_age` is met and no deploy is in progress.
-7. **Cap reached but workers idle?** That isn't a reason to raise the cap. Staged work, reviews, audits, design proposals and the delivery queue's rebases are all real work. Raise the cap only on the maintainer's word, and record the new value in the ledger.
+7. **Already far over the cap** (for example, the run starts with dozens of PRs open)? Staging stops it getting worse. Getting back under means draining, which is the maintainer's call, because the bot's tools can't set draft state or close PRs:
+   - Write a plan, `pr-draft-plan.md`, with three lists:
+     - **keep ready:** PRs green and awaiting merge, live security fixes, and the prerequisites of either;
+     - **close:** superseded PRs;
+     - **draft:** everything else, in un-draft priority order.
+   - Include the ready-to-run `gh pr close` / `gh pr ready --undo` loops for the maintainer.
+   - If drafts still run CI, also draft the workflow patch that skips them. It's `.github/`, so it's the maintainer's to apply.
+   - Cancelling runs already queued for drafted PRs is a separate yes from the maintainer.
+   - Afterwards, un-drafting (`gh pr ready`, by the maintainer, or by the bot if the identity proxy gains a draft tool) works like a `DELIVER`: the top draft goes ready when a slot opens. Rebase it first if main has moved.
+8. **Cap reached but workers idle?** That isn't a reason to raise the cap. Staged work, reviews, audits, design proposals and the delivery queue's rebases are all real work. Raise the cap only on the maintainer's word, and record the new value in the ledger.
 
-**Report the budget** in every heartbeat line (`open 9/4 · queue 158 oldest 15.7h · staged 12`) and in the handoff report, with the delivery queue in priority order, so the maintainer sees the backlog the cap is holding back.
+**Report the budget** in every heartbeat line (`needs-CI 9/4 · awaiting merge 23 · drafts 71 · queue 158 oldest 15.7h · staged 12`) and in the handoff report, with the delivery queue in priority order, so the maintainer sees the backlog the cap is holding back.
 
 ## PR descriptions (technical writer)
 
@@ -164,7 +175,7 @@ Per tick:
 3. Dead worker (gone from ListAgents, SendMessage errors, silent 2 ticks) → respawn fresh with kickoff + handoff paragraph built from reconciled state ("you replace w2; PR #510 open CI red; branch exists; reconcile, don't restart").
 4. Stuck worker (same issue >3 ticks) → timebox order; one more tick → park it (WIP branch + issue comment, issue → deferred).
 5. **Cancelled ≠ failed.** On a shared self-hosted runner, the maintainer may cancel queued PR runs on purpose to let a deploy through. Re-queue cancelled runs only once no deploy is in progress, and don't report them as red CI. A worker's job is never "rerun CI" (the bot usually can't); the orchestrator does it.
-6. Heartbeat line into the ledger with the budget (`open 9/4 · queue 158 oldest 15.7h · staged 12`), reschedule (ScheduleWakeup mode only; a cron re-fires on its own).
+6. Heartbeat line into the ledger with the budget (`needs-CI 9/4 · awaiting merge 23 · drafts 71 · queue 158 oldest 15.7h · staged 12`), reschedule (ScheduleWakeup mode only; a cron re-fires on its own).
 
 ## Production uptime loop (orchestrator)
 
